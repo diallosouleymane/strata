@@ -6,7 +6,7 @@ import (
 	"fmt"
 )
 
-var ErrTxDone = errors.New("btree: transaction déjà validée ou annulée")
+var ErrTxDone = errors.New("btree: transaction already committed or rolled back")
 
 // Tx est une transaction d'écriture. Elle travaille sur sa propre racine et garde ses pages en mémoire :
 // les autres lecteurs ne voient rien avant Commit, et Rollback n'a qu'à tout oublier.
@@ -30,7 +30,7 @@ func (tx *Tx) get(id uint64) node {
 
 func (tx *Tx) alloc(n node) uint64 {
 	if n.nbytes() > PageSize {
-		panic(fmt.Sprintf("btree: nœud de %d octets alloué, plus qu'une page", n.nbytes()))
+		panic(fmt.Sprintf("btree: allocated a %d-byte node, larger than a page", n.nbytes()))
 	}
 	id := tx.takePage()
 	tx.dirty[id] = n

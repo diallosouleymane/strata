@@ -6,7 +6,7 @@ import (
 	"time"
 )
 
-var ErrBusy = errors.New("btree: une autre transaction d'écriture est en cours")
+var ErrBusy = errors.New("btree: another write transaction is in progress")
 
 // busyTimeout borne l'attente d'une transaction d'écriture : un client qui laisse un BEGIN ouvert
 // ne doit pas bloquer les autres indéfiniment.

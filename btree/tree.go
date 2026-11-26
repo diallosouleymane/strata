@@ -15,9 +15,9 @@ type pageStore interface {
 }
 
 var (
-	ErrEmptyKey   = errors.New("btree: clé vide")
-	ErrKeyTooLong = fmt.Errorf("btree: clé de plus de %d octets", MaxKeySize)
-	ErrValTooLong = fmt.Errorf("btree: valeur de plus de %d octets", MaxValSize)
+	ErrEmptyKey   = errors.New("btree: empty key")
+	ErrKeyTooLong = fmt.Errorf("btree: key longer than %d bytes", MaxKeySize)
+	ErrValTooLong = fmt.Errorf("btree: value longer than %d bytes", MaxValSize)
 )
 
 // La page 0 n'est jamais un nœud (c'est une page méta sur disque) : root == 0 veut dire « arbre vide ».
@@ -42,7 +42,7 @@ func checkKV(key, val []byte) error {
 func lookup(n node, key []byte) uint16 {
 	i := n.lookupLE(key)
 	if i < 0 {
-		panic("btree: clé sentinelle absente du nœud le plus à gauche")
+		panic("btree: sentinel key missing from the leftmost node")
 	}
 	return uint16(i)
 }
@@ -96,7 +96,7 @@ func (t *tree) insert(n node, key, val []byte) node {
 		t.pages.free(kidID)
 		return t.replaceKids(n, i, 1, split(kid))
 	}
-	panic(fmt.Sprintf("btree: type de nœud inconnu %d", n.kind()))
+	panic(fmt.Sprintf("btree: unknown node type %d", n.kind()))
 }
 
 // newRoot fait grandir l'arbre par le haut tant que la racine ne tient pas dans une page.
@@ -205,7 +205,7 @@ func (t *tree) remove(n node, key []byte) node {
 		t.pages.free(kidID)
 		return t.rebalance(n, i, kid)
 	}
-	panic(fmt.Sprintf("btree: type de nœud inconnu %d", n.kind()))
+	panic(fmt.Sprintf("btree: unknown node type %d", n.kind()))
 }
 
 func fits(left, right node) bool {

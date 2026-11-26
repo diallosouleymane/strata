@@ -121,10 +121,10 @@ func (p *pager) load(path string) error {
 		}
 	}
 	if !found {
-		return errors.New("btree: aucune page méta valide, ce n'est pas un fichier strata ou il est corrompu")
+		return errors.New("btree: no valid meta page, not a strata file or corrupted")
 	}
 	if int64(best.npages)*PageSize > info.Size() {
-		return fmt.Errorf("btree: la méta annonce %d pages mais le fichier n'en contient que %d", best.npages, info.Size()/PageSize)
+		return fmt.Errorf("btree: meta claims %d pages but the file holds only %d", best.npages, info.Size()/PageSize)
 	}
 	p.committed = best
 
@@ -141,20 +141,20 @@ func (p *pager) validPage(id uint64) bool { return id >= metaPages && id < p.com
 func (p *pager) readFreelist(head uint64) (ids, pages []uint64, err error) {
 	for id := head; id != 0; {
 		if !p.validPage(id) || uint64(len(pages)) >= p.committed.npages {
-			return nil, nil, fmt.Errorf("btree: liste libre corrompue à la page %d", id)
+			return nil, nil, fmt.Errorf("btree: corrupt free list at page %d", id)
 		}
 		b := make([]byte, PageSize)
 		if _, err := p.f.ReadAt(b, int64(id)*PageSize); err != nil {
-			return nil, nil, fmt.Errorf("btree: lecture de la liste libre, page %d : %w", id, err)
+			return nil, nil, fmt.Errorf("btree: reading free list page %d: %w", id, err)
 		}
 		count := int(binary.LittleEndian.Uint16(b[2:]))
 		if binary.LittleEndian.Uint16(b) != nodeFreelist || count > freelistPerPage {
-			return nil, nil, fmt.Errorf("btree: page %d : ce n'est pas une page de liste libre", id)
+			return nil, nil, fmt.Errorf("btree: page %d is not a free list page", id)
 		}
 		for i := 0; i < count; i++ {
 			free := binary.LittleEndian.Uint64(b[freelistHeader+8*i:])
 			if !p.validPage(free) {
-				return nil, nil, fmt.Errorf("btree: la liste libre cite la page %d, hors du fichier", free)
+				return nil, nil, fmt.Errorf("btree: free list references page %d, past the end of the file", free)
 			}
 			ids = append(ids, free)
 		}
@@ -167,14 +167,14 @@ func (p *pager) readFreelist(head uint64) (ids, pages []uint64, err error) {
 // readPage lit un nœud de la version validée.
 func (p *pager) readPage(id uint64) node {
 	if !p.validPage(id) {
-		panic(pageError{fmt.Errorf("btree: page %d hors du fichier (%d pages)", id, p.committed.npages)})
+		panic(pageError{fmt.Errorf("btree: page %d past the end of the file (%d pages)", id, p.committed.npages)})
 	}
 	n := make(node, PageSize)
 	if _, err := p.f.ReadAt(n, int64(id)*PageSize); err != nil {
-		panic(pageError{fmt.Errorf("btree: lecture de la page %d : %w", id, err)})
+		panic(pageError{fmt.Errorf("btree: reading page %d: %w", id, err)})
 	}
 	if k := n.kind(); k != nodeLeaf && k != nodeInternal {
-		panic(pageError{fmt.Errorf("btree: page %d corrompue, type de nœud %d", id, k)})
+		panic(pageError{fmt.Errorf("btree: corrupt page %d, node type %d", id, k)})
 	}
 	return n
 }
@@ -192,8 +192,8 @@ func (p *pager) writeMeta(m meta) error {
 type snapshot struct{ p *pager }
 
 func (s snapshot) get(id uint64) node { return s.p.readPage(id) }
-func (s snapshot) alloc(node) uint64  { panic("btree: écriture à travers une lecture seule") }
-func (s snapshot) free(uint64)        { panic("btree: écriture à travers une lecture seule") }
+func (s snapshot) alloc(node) uint64  { panic("btree: write through a read-only snapshot") }
+func (s snapshot) free(uint64)        { panic("btree: write through a read-only snapshot") }
 
 func syncDir(dir string) error {
 	d, err := os.Open(dir)

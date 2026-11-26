@@ -29,7 +29,7 @@ func main() {
 	if *connect != "" {
 		c, err := server.Dial(*connect)
 		if err != nil {
-			log.Fatalf("connexion à %s : %v", *connect, err)
+			log.Fatalf("connecting to %s: %v", *connect, err)
 		}
 		defer c.Close()
 		loop(c.Execute)
@@ -42,22 +42,22 @@ func main() {
 	}
 	db, err := btree.Open(path)
 	if err != nil {
-		log.Fatalf("ouverture de %s : %v", path, err)
+		log.Fatalf("opening %s: %v", path, err)
 	}
 	defer db.Close()
 
 	if *listen != "" {
 		ln, err := net.Listen("tcp", *listen)
 		if err != nil {
-			log.Fatalf("écoute sur %s : %v", *listen, err)
+			log.Fatalf("listening on %s: %v", *listen, err)
 		}
 		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 		defer stop()
-		log.Printf("strata sert %s sur %s (Ctrl+C pour arrêter)", path, ln.Addr())
+		log.Printf("strata serving %s on %s (Ctrl+C to stop)", path, ln.Addr())
 		if err := server.Serve(ctx, ln, db); err != nil {
-			log.Printf("serveur : %v", err)
+			log.Printf("server: %v", err)
 		}
-		log.Printf("strata arrêté, connexions fermées")
+		log.Printf("strata stopped, connections closed")
 		return
 	}
 
@@ -92,6 +92,6 @@ func loop(execute func(line string) (out string, inTx bool, err error)) {
 		}
 	}
 	if err := in.Err(); err != nil {
-		log.Printf("lecture de l'entrée : %v", err)
+		log.Printf("reading input: %v", err)
 	}
 }

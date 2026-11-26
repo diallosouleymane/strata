@@ -45,7 +45,7 @@ func (n node) setHeader(kind, nkeys uint16) {
 
 func (n node) checkIndex(i uint16) {
 	if i >= n.nkeys() {
-		panic(fmt.Sprintf("btree: indice %d hors du nœud (%d clés)", i, n.nkeys()))
+		panic(fmt.Sprintf("btree: index %d out of range (%d keys)", i, n.nkeys()))
 	}
 }
 
