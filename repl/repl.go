@@ -4,18 +4,18 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/diallosouleymane/strata/kv"
+	"github.com/diallosouleymane/strata/btree"
 )
 
 // Execute est séparé de la boucle stdin pour pouvoir le tester sans terminal.
 //
 // Commandes (insensibles à la casse) :
 //
-//	SET <clé> <valeur>  -> "OK"
-//	GET <clé>           -> la valeur, ou "(nil)"
-//	DEL <clé>           -> "1" si supprimée, "0" sinon
-//	COMPACT             -> "OK" (réécrit le journal sans les entrées périmées)
-func Execute(s *kv.Store, line string) string {
+//	SET <clé> <valeur>     -> "OK"
+//	GET <clé>              -> la valeur, ou "(nil)"
+//	DEL <clé>              -> "1" si supprimée, "0" sinon
+//	SCAN [début [fin]]     -> les paires de [début, fin) triées, une par ligne, ou "(empty)"
+func Execute(db *btree.DB, line string) string {
 	args := strings.Fields(line)
 	if len(args) == 0 {
 		return ""
@@ -27,7 +27,7 @@ func Execute(s *kv.Store, line string) string {
 		if len(args) != 3 {
 			return wrongArgs(cmd)
 		}
-		if err := s.Set(args[1], args[2]); err != nil {
+		if err := db.Set([]byte(args[1]), []byte(args[2])); err != nil {
 			return "ERR " + err.Error()
 		}
 		return "OK"
@@ -36,16 +36,20 @@ func Execute(s *kv.Store, line string) string {
 		if len(args) != 2 {
 			return wrongArgs(cmd)
 		}
-		if v, ok := s.Get(args[1]); ok {
-			return v
+		v, ok, err := db.Get([]byte(args[1]))
+		if err != nil {
+			return "ERR " + err.Error()
 		}
-		return "(nil)"
+		if !ok {
+			return "(nil)"
+		}
+		return string(v)
 
 	case "DEL":
 		if len(args) != 2 {
 			return wrongArgs(cmd)
 		}
-		deleted, err := s.Delete(args[1])
+		deleted, err := db.Delete([]byte(args[1]))
 		if err != nil {
 			return "ERR " + err.Error()
 		}
@@ -54,14 +58,29 @@ func Execute(s *kv.Store, line string) string {
 		}
 		return "0"
 
-	case "COMPACT":
-		if len(args) != 1 {
+	case "SCAN":
+		if len(args) > 3 {
 			return wrongArgs(cmd)
 		}
-		if err := s.Compact(); err != nil {
+		var start, end []byte
+		if len(args) > 1 {
+			start = []byte(args[1])
+		}
+		if len(args) > 2 {
+			end = []byte(args[2])
+		}
+		var lines []string
+		err := db.Scan(start, end, func(k, v []byte) bool {
+			lines = append(lines, string(k)+" = "+string(v))
+			return true
+		})
+		if err != nil {
 			return "ERR " + err.Error()
 		}
-		return "OK"
+		if len(lines) == 0 {
+			return "(empty)"
+		}
+		return strings.Join(lines, "\n")
 	}
 
 	return fmt.Sprintf("ERR unknown command '%s'", cmd)

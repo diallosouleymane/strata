@@ -70,3 +70,11 @@ func recoverPageError(err *error) {
 		*err = pe.err
 	}
 }
+
+// Scan parcourt les clés de [start, end) dans l'ordre ; start == nil part du début, end == nil va jusqu'à la fin.
+// fn renvoie false pour arrêter. key et val ne sont valables que pendant l'appel : les copier pour les garder.
+func (db *DB) Scan(start, end []byte, fn func(key, val []byte) bool) (err error) {
+	defer recoverPageError(&err)
+	db.t.scan(start, end, fn)
+	return nil
+}

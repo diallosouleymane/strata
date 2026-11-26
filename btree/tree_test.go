@@ -285,3 +285,88 @@ func TestTreeRandomOpsMatchMap(t *testing.T) {
 		}
 	}
 }
+
+func collect(tr *tree, start, end []byte, limit int) []string {
+	var got []string
+	tr.scan(start, end, func(k, v []byte) bool {
+		got = append(got, string(k)+"="+string(v))
+		return limit == 0 || len(got) < limit
+	})
+	return got
+}
+
+func TestTreeScanSmall(t *testing.T) {
+	tr, _ := newMemTree()
+	if got := collect(tr, nil, nil, 0); len(got) != 0 {
+		t.Fatalf("scan d'un arbre vide = %v", got)
+	}
+	for _, k := range []string{"d", "b", "a", "c", "e"} {
+		tr.set([]byte(k), []byte(strings.ToUpper(k)))
+	}
+	cases := []struct {
+		start, end string
+		limit      int
+		want       string
+	}{
+		{"", "", 0, "a=A b=B c=C d=D e=E"},
+		{"b", "", 0, "b=B c=C d=D e=E"},
+		{"bb", "d", 0, "c=C"},
+		{"", "c", 0, "a=A b=B"},
+		{"c", "c", 0, ""},
+		{"z", "", 0, ""},
+		{"", "", 2, "a=A b=B"},
+	}
+	for _, c := range cases {
+		var start, end []byte
+		if c.start != "" {
+			start = []byte(c.start)
+		}
+		if c.end != "" {
+			end = []byte(c.end)
+		}
+		if got := strings.Join(collect(tr, start, end, c.limit), " "); got != c.want {
+			t.Errorf("scan(%q, %q, limite %d) = %q ; attendu %q", c.start, c.end, c.limit, got, c.want)
+		}
+	}
+}
+
+// Des plages au hasard sur un grand arbre, comparées à une liste triée.
+func TestTreeScanMatchesSortedMap(t *testing.T) {
+	tr, _ := newMemTree()
+	want := map[string]string{}
+	r := rand.New(rand.NewPCG(11, 12))
+	for i := 0; i < 5000; i++ {
+		k := fmt.Sprintf("%05d", r.IntN(20000))
+		tr.set([]byte(k), []byte("v"))
+		want[k] = "v"
+	}
+	for i := 0; i < 1000; i++ {
+		k := fmt.Sprintf("%05d", r.IntN(20000))
+		tr.del([]byte(k))
+		delete(want, k)
+	}
+	sorted := make([]string, 0, len(want))
+	for k := range want {
+		sorted = append(sorted, k)
+	}
+	sort.Strings(sorted)
+
+	for i := 0; i < 300; i++ {
+		a, b := fmt.Sprintf("%05d", r.IntN(21000)), fmt.Sprintf("%05d", r.IntN(21000))
+		if a > b {
+			a, b = b, a
+		}
+		var exp []string
+		for _, k := range sorted {
+			if k >= a && k < b {
+				exp = append(exp, k+"=v")
+			}
+		}
+		if got := collect(tr, []byte(a), []byte(b), 0); strings.Join(got, ",") != strings.Join(exp, ",") {
+			t.Fatalf("scan(%s, %s) : %d clés ; attendu %d", a, b, len(got), len(exp))
+		}
+	}
+	if got := collect(tr, nil, nil, 0); len(got) != len(sorted) {
+		t.Fatalf("scan complet : %d clés ; attendu %d", len(got), len(sorted))
+	}
+}

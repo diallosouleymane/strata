@@ -6,26 +6,26 @@ import (
 	"log"
 	"os"
 
-	"github.com/diallosouleymane/strata/kv"
+	"github.com/diallosouleymane/strata/btree"
 	"github.com/diallosouleymane/strata/repl"
 )
 
 func main() {
-	path := "strata.log"
+	path := "strata.db"
 	if len(os.Args) > 1 {
 		path = os.Args[1]
 	}
 
-	store, err := kv.Open(path)
+	db, err := btree.Open(path)
 	if err != nil {
 		log.Fatalf("ouverture de %s : %v", path, err)
 	}
-	defer store.Close()
+	defer db.Close()
 
 	in := bufio.NewScanner(os.Stdin)
 	fmt.Print("strata> ")
 	for in.Scan() {
-		if out := repl.Execute(store, in.Text()); out != "" {
+		if out := repl.Execute(db, in.Text()); out != "" {
 			fmt.Println(out)
 		}
 		fmt.Print("strata> ")

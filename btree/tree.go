@@ -238,3 +238,40 @@ func (t *tree) rebalance(n node, i uint16, kid node) node {
 	// peut être plus longue que l'ancienne, et elle remonte dans le parent.
 	return t.replaceKids(n, i, 1, split(kid))
 }
+
+// scan appelle fn sur chaque clé de [start, end), dans l'ordre. end == nil veut dire « jusqu'à la fin ».
+// fn renvoie false pour arrêter. key et val pointent dans la page : ils ne sont valables que pendant l'appel.
+func (t *tree) scan(start, end []byte, fn func(key, val []byte) bool) {
+	if t.root != 0 {
+		t.scanNode(t.root, start, end, fn)
+	}
+}
+
+// scanNode descend directement vers start, puis parcourt les enfants de gauche à droite :
+// seules les pages qui contiennent des clés de la plage sont lues.
+func (t *tree) scanNode(id uint64, start, end []byte, fn func(key, val []byte) bool) bool {
+	n := t.pages.get(id)
+	from := uint16(0)
+	if i := n.lookupLE(start); i > 0 {
+		from = uint16(i)
+	}
+	for i := from; i < n.nkeys(); i++ {
+		k := n.key(i)
+		if end != nil && bytes.Compare(k, end) >= 0 {
+			return false
+		}
+		if n.kind() == nodeInternal {
+			if !t.scanNode(n.ptr(i), start, end, fn) {
+				return false
+			}
+			continue
+		}
+		if len(k) == 0 || bytes.Compare(k, start) < 0 {
+			continue // la sentinelle, ou une clé avant le début de la plage
+		}
+		if !fn(k, n.val(i)) {
+			return false
+		}
+	}
+	return true
+}

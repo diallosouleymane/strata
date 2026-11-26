@@ -4,16 +4,16 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/diallosouleymane/strata/kv"
+	"github.com/diallosouleymane/strata/btree"
 )
 
-// Les cas s'enchaînent sur le même store : l'ordre compte.
+// Les cas s'enchaînent sur la même base : l'ordre compte.
 func TestExecute(t *testing.T) {
-	s, err := kv.Open(filepath.Join(t.TempDir(), "db.log"))
+	db, err := btree.Open(filepath.Join(t.TempDir(), "strata.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer s.Close()
+	defer db.Close()
 	cases := []struct{ in, want string }{
 		{"SET name Issa", "OK"},
 		{"GET name", "Issa"},
@@ -28,13 +28,19 @@ func TestExecute(t *testing.T) {
 		{"SET a", "ERR wrong number of arguments for 'SET'"},
 		{"GET", "ERR wrong number of arguments for 'GET'"},
 		{"DEL a b", "ERR wrong number of arguments for 'DEL'"},
-		{"SET x 1", "OK"},
-		{"compact", "OK"},
-		{"GET x", "1"},
-		{"COMPACT now", "ERR wrong number of arguments for 'COMPACT'"},
+		{"SCAN", "(empty)"},
+		{"SET pomme 3", "OK"},
+		{"SET ananas 1", "OK"},
+		{"SET cerise 7", "OK"},
+		{"SET banane 2", "OK"},
+		{"scan", "ananas = 1\nbanane = 2\ncerise = 7\npomme = 3"},
+		{"SCAN b", "banane = 2\ncerise = 7\npomme = 3"},
+		{"SCAN b d", "banane = 2\ncerise = 7"},
+		{"SCAN x", "(empty)"},
+		{"SCAN a b c", "ERR wrong number of arguments for 'SCAN'"},
 	}
 	for _, c := range cases {
-		if got := Execute(s, c.in); got != c.want {
+		if got := Execute(db, c.in); got != c.want {
 			t.Errorf("Execute(%q) = %q ; attendu %q", c.in, got, c.want)
 		}
 	}
