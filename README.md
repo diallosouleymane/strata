@@ -1,14 +1,14 @@
 # strata
 
-Une base de données écrite de zéro en Go, couche par couche, pour comprendre ce qui se passe sous Postgres ou SQLite. Aucune dépendance : uniquement la bibliothèque standard.
+A database written from scratch in Go, one layer at a time, to understand what happens under Postgres or SQLite. No dependencies: only the standard library.
 
-C'est un projet d'apprentissage. Chaque étape donne une base qui fonctionne et qui est testée.
+This is a learning project. Every step produces a working, tested database.
 
-## Démarrer
+## Getting started
 
 ```bash
-go run ./cmd/strata            # ouvre ou crée ./strata.log
-go run ./cmd/strata autre.log  # ou un autre fichier
+go run ./cmd/strata            # opens or creates ./strata.log
+go run ./cmd/strata other.log  # or any other file
 ```
 
 ```
@@ -24,53 +24,53 @@ strata> COMPACT
 OK
 ```
 
-Les données survivent au redémarrage. Pour lancer les tests : `go test ./...`
+Data survives restarts. To run the tests: `go test ./...`
 
-## Architecture visée
+## Target architecture
 
 ```
-client (REPL, puis TCP)
+client (REPL, then TCP)
    │
-Parseur SQL      texte → AST
-Exécuteur        AST → opérations
-Tables           ligne → clé/valeur encodée
-B-tree           clés triées, recherche et plages
-Pager            pages de 4 Ko, cache
-WAL              journal, reprise après crash
+SQL parser       text → AST
+Executor         AST → operations
+Tables           row → encoded key/value
+B-tree           sorted keys, lookups and ranges
+Pager            4 KB pages, cache
+WAL              log, crash recovery
    │
-fichier sur disque
+file on disk
 ```
 
-## Feuille de route
+## Roadmap
 
-- [x] **1. KV en mémoire** : `SET`, `GET`, `DEL` et le REPL
-- [x] **2. Journal en ajout seul** : format binaire avec CRC32, `fsync`, relecture à l'ouverture, troncature d'une fin abîmée par un crash
-- [x] **3. Compaction** : réécrire le journal avec la dernière valeur de chaque clé, à la demande (`COMPACT`) ou automatiquement
-- [ ] **4. Pager et B-tree** : stockage par pages, requêtes par plage
-- [ ] **5. Transactions** : `BEGIN`, `COMMIT`, `ROLLBACK`, reprise après crash
-- [ ] **6. Mini-SQL** : `CREATE TABLE`, `INSERT`, `SELECT … WHERE`
-- [ ] **7. Serveur TCP** : plusieurs clients en parallèle
+- [x] **1. In-memory KV**: `SET`, `GET`, `DEL` and the REPL
+- [x] **2. Append-only log**: binary format with CRC32, `fsync`, replay on open, truncation of a tail damaged by a crash
+- [x] **3. Compaction**: rewrite the log with the latest value of each key, on demand (`COMPACT`) or automatically
+- [ ] **4. Pager and B-tree**: page-based storage, range queries
+- [ ] **5. Transactions**: `BEGIN`, `COMMIT`, `ROLLBACK`, crash recovery
+- [ ] **6. Mini-SQL**: `CREATE TABLE`, `INSERT`, `SELECT … WHERE`
+- [ ] **7. TCP server**: multiple concurrent clients
 
-Ensuite, le même chemin en Rust.
+Then the same path in Rust.
 
-## Format du journal
+## Log format
 
-Chaque opération est ajoutée à la fin du fichier (entiers en little-endian) :
+Each operation is appended to the end of the file (little-endian integers):
 
 ```
-| crc32 (4) | op (1) | len clé (4) | len valeur (4) | clé | valeur |
+| crc32 (4) | op (1) | key len (4) | value len (4) | key | value |
 ```
 
-`op` vaut 1 pour `SET` et 2 pour `DEL`. Le CRC32 couvre tout ce qui le suit. Au démarrage, le journal est rejoué dans l'ordre ; un enregistrement incomplet ou dont le CRC est faux marque la fin du journal valide, et le fichier est coupé à cet endroit.
+`op` is 1 for `SET` and 2 for `DEL`. The CRC32 covers everything after it. On startup, the log is replayed in order; an incomplete record, or one with a bad CRC, marks the end of the valid log, and the file is truncated there.
 
 ## Compaction
 
-Le journal garde toutes les versions d'une clé. La compaction écrit un journal neuf (`<fichier>.compact`) avec un seul `SET` par clé vivante, le synchronise, puis le renomme par-dessus l'ancien. `rename` étant atomique, un crash laisse soit l'ancien journal, soit le nouveau, jamais un mélange. Elle se déclenche toute seule dès 1000 enregistrements quand plus de la moitié sont périmés.
+The log keeps every version of a key. Compaction writes a fresh log (`<file>.compact`) with a single `SET` per live key, syncs it, then renames it over the old one. Since `rename` is atomic, a crash leaves either the old log or the new one, never a mix. It triggers automatically once the log holds 1000 records and more than half of them are stale.
 
-## Organisation
+## Layout
 
 ```
-kv/          le moteur de stockage (Store, format des enregistrements)
-repl/        une ligne de commande → une réponse
-cmd/strata/  le programme interactif
+kv/          the storage engine (Store, record format)
+repl/        one command line → one response
+cmd/strata/  the interactive program
 ```
