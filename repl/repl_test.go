@@ -2,6 +2,7 @@ package repl
 
 import (
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/diallosouleymane/strata/btree"
@@ -90,5 +91,35 @@ func TestShowEscapesControlBytes(t *testing.T) {
 	}
 	if got := show([]byte("\x02users\x00")); got != `"\x02users\x00"` {
 		t.Fatalf("show = %s", got)
+	}
+}
+
+func TestSQLInREPL(t *testing.T) {
+	db, err := btree.Open(filepath.Join(t.TempDir(), "strata.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	s := NewSession(db)
+	cases := []struct{ in, want string }{
+		{"CREATE TABLE users (id INT, name TEXT)", "CREATE TABLE"},
+		{"INSERT INTO users VALUES (1, 'Issa'), (20, 'Awa')", "INSERT 2"},
+		{"SELECT * FROM users", "id | name\n---+-----\n 1 | Issa\n20 | Awa \n(2 rows, full table scan)"},
+		{"select*from users where id = 20", "id | name\n---+-----\n20 | Awa \n(1 row, primary key lookup)"},
+		{"BEGIN", "OK"},
+		{"DELETE FROM users WHERE id = 1", "DELETE 1"},
+		{"ROLLBACK", "OK"},
+		{"SELECT name FROM users WHERE id >= 1", "name\n----\nIssa\nAwa \n(2 rows, primary key range scan)"},
+		{"SELECT * FROM nope", "ERR table nope does not exist"},
+		{"SELECT * FORM users", `ERR syntax error at position 9: expected FROM, found "form"`},
+	}
+	for _, c := range cases {
+		if got := s.Execute(c.in); got != c.want {
+			t.Errorf("Execute(%q) =\n%s\nattendu\n%s", c.in, got, c.want)
+		}
+	}
+	// Les tables sont de simples clés du B+tree : SCAN les montre, octets de contrôle échappés.
+	if got := s.Execute("SCAN"); !strings.Contains(got, `"\x02users\x00\x80\x00\x00\x00\x00\x00\x00\x01"`) {
+		t.Errorf("SCAN doit montrer la ligne 1 de users sous sa clé encodée :\n%s", got)
 	}
 }

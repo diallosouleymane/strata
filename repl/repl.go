@@ -8,6 +8,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/diallosouleymane/strata/btree"
+	"github.com/diallosouleymane/strata/sql"
 )
 
 // Session porte l'état d'un utilisateur : sa transaction ouverte, s'il en a une.
@@ -44,7 +45,13 @@ func (s *Session) Execute(line string) string {
 		return ""
 	}
 	cmd := strings.ToUpper(args[0])
-	out, err := s.run(cmd, args)
+	var out string
+	var err error
+	if sqlCommands[firstWord(cmd)] {
+		out, err = s.sql(line)
+	} else {
+		out, err = s.run(cmd, args)
+	}
 	if err != nil {
 		// Une transaction morte (erreur d'entrée-sortie en plein milieu) ne doit pas rester attachée à la session.
 		if errors.Is(err, btree.ErrTxDone) {
@@ -143,6 +150,96 @@ func (s *Session) run(cmd string, args []string) (string, error) {
 	}
 
 	return fmt.Sprintf("ERR unknown command '%s'", cmd), nil
+}
+
+var sqlCommands = map[string]bool{"CREATE": true, "INSERT": true, "SELECT": true, "UPDATE": true, "DELETE": true}
+
+// firstWord coupe au premier caractère qui n'est pas une lettre, pour reconnaître SELECT dans « SELECT*FROM t ».
+func firstWord(s string) string {
+	if i := strings.IndexFunc(s, func(r rune) bool { return r < 'A' || r > 'Z' }); i >= 0 {
+		return s[:i]
+	}
+	return s
+}
+
+// sql exécute une instruction SQL. Dans un BEGIN, elle rejoint la transaction ouverte. Sinon, un SELECT
+// lit directement la dernière version validée, sans bloquer personne, et une écriture devient sa propre
+// transaction.
+func (s *Session) sql(line string) (string, error) {
+	stmt, err := sql.Parse(line)
+	if err != nil {
+		return "", err
+	}
+	var res *sql.Result
+	_, isSelect := stmt.(*sql.Select)
+	switch {
+	case s.tx != nil:
+		res, err = sql.Exec(s.tx, stmt)
+	case isSelect:
+		res, err = sql.Exec(s.db, stmt)
+	default:
+		tx, berr := s.db.Begin()
+		if berr != nil {
+			return "", berr
+		}
+		if res, err = sql.Exec(tx, stmt); err != nil {
+			tx.Rollback()
+		} else {
+			err = tx.Commit()
+		}
+	}
+	if err != nil {
+		return "", err
+	}
+	return formatResult(res), nil
+}
+
+// formatResult dessine un tableau à la manière de psql, les nombres alignés à droite.
+func formatResult(res *sql.Result) string {
+	if res.Columns == nil {
+		return res.Message
+	}
+	widths := make([]int, len(res.Columns))
+	for i, c := range res.Columns {
+		widths[i] = utf8.RuneCountInString(c)
+	}
+	for _, row := range res.Rows {
+		for i, v := range row {
+			widths[i] = max(widths[i], utf8.RuneCountInString(v.String()))
+		}
+	}
+	pad := func(s string, w int, right bool) string {
+		gap := strings.Repeat(" ", w-utf8.RuneCountInString(s))
+		if right {
+			return gap + s
+		}
+		return s + gap
+	}
+	var b strings.Builder
+	var sep []string
+	for i, c := range res.Columns {
+		if i > 0 {
+			b.WriteString(" | ")
+		}
+		b.WriteString(pad(c, widths[i], false))
+		sep = append(sep, strings.Repeat("-", widths[i]))
+	}
+	b.WriteString("\n" + strings.Join(sep, "-+-"))
+	for _, row := range res.Rows {
+		b.WriteString("\n")
+		for i, v := range row {
+			if i > 0 {
+				b.WriteString(" | ")
+			}
+			b.WriteString(pad(v.String(), widths[i], v.Type == sql.TypeInt))
+		}
+	}
+	plural := "s"
+	if len(res.Rows) == 1 {
+		plural = ""
+	}
+	fmt.Fprintf(&b, "\n(%d row%s, %s)", len(res.Rows), plural, res.Plan)
+	return b.String()
 }
 
 // show affiche les octets tels quels s'ils sont lisibles, sinon entre guillemets avec des échappements :

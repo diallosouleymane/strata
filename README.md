@@ -36,6 +36,21 @@ strata*> ROLLBACK
 OK
 ```
 
+SQL runs on top of the same storage:
+
+```
+strata> CREATE TABLE eleves (id INT, nom TEXT, ville TEXT, note INT)
+CREATE TABLE
+strata> INSERT INTO eleves VALUES (1, 'Issa', 'Abidjan', 15), (2, 'Awa', 'Bouaké', 18), (3, 'Koffi', 'Abidjan', 12)
+INSERT 3
+strata> SELECT nom, note FROM eleves WHERE id >= 2 AND id <= 3
+nom   | note
+------+-----
+Awa   |   18
+Koffi |   12
+(2 rows, primary key range scan)
+```
+
 `SCAN [start [end]]` lists the keys in `[start, end)` in order. Data survives restarts and crashes. To run the tests: `go test ./...`
 
 ## Target architecture
@@ -65,7 +80,7 @@ file on disk
   - [x] 4e. Free list: reuse pages freed by earlier commits
   - [x] 4f. Range scans (`SCAN`), and the B+tree replaces the log behind the REPL
 - [x] **5. Transactions**: `BEGIN`, `COMMIT`, `ROLLBACK`, several writes in a single commit, readers never blocked by the writer
-- [ ] **6. Mini-SQL**: `CREATE TABLE`, `INSERT`, `SELECT … WHERE`
+- [x] **6. Mini-SQL**: `CREATE TABLE`, `INSERT`, `SELECT … WHERE … LIMIT`, `UPDATE`, `DELETE`, range scans on the primary key
 - [ ] **7. TCP server**: multiple concurrent clients
 
 Then the same path in Rust.
@@ -92,6 +107,19 @@ The two meta slots alternate (version `v` goes to slot `v % 2`), so a meta write
 
 Freed pages are listed in a chain of free list pages that the meta points to. A page freed by commit `N` still belongs to the tree of version `N - 1`, the one a crash would fall back to, so it only becomes reusable from commit `N + 1`.
 
+## SQL
+
+The SQL layer (`sql/`) turns a statement into reads and writes on the B+tree: a lexer cuts the text into tokens, a recursive descent parser builds a syntax tree, and the executor runs it. It supports `INT` and `TEXT` columns; the first column is the primary key.
+
+A table is only a set of keys sharing a prefix:
+
+```
+schema: 0x01 <table>                    -> columns
+row:    0x02 <table> 0x00 <primary key>  -> all the column values
+```
+
+Primary keys are encoded so that byte order matches value order (an `INT` gets its sign bit flipped and is written big-endian), so the rows of a table are stored next to each other, sorted by primary key. Conditions on the primary key joined by `AND` (`id = 7`, `id >= 10 AND id < 20`) narrow the scan to a key range; anything else scans the whole table. Each result shows which plan was used. Every statement is validated before it writes anything, so a failing statement changes nothing, even inside `BEGIN`.
+
 ## Transactions and concurrency
 
 `BEGIN` opens a write transaction: its writes go to new pages kept in memory, and only that session sees them. `COMMIT` writes them all with a single pair of `fsync`s, so a transaction is all or nothing, even across a crash. `ROLLBACK` just drops the pages. Outside `BEGIN`, each write is its own transaction.
@@ -101,7 +129,8 @@ There is one writer at a time; a second one waits up to 5 seconds, then gets an 
 ## Layout
 
 ```
-btree/       B+tree nodes, the tree, and the pager that stores it in a file
+btree/       B+tree nodes, the tree, transactions, and the pager that stores it in a file
+sql/         lexer, parser, planner and executor
 repl/        one command line → one response
 cmd/strata/  the interactive program
 ```
