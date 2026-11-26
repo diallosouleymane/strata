@@ -9,6 +9,9 @@ This is a learning project. Every step produces a working, tested database.
 ```bash
 go run ./cmd/strata            # opens or creates ./strata.db
 go run ./cmd/strata other.db   # or any other file
+
+go run ./cmd/strata -listen :7878 strata.db   # serve it over TCP
+go run ./cmd/strata -connect localhost:7878   # in another terminal, as many times as you like
 ```
 
 ```
@@ -81,7 +84,7 @@ file on disk
   - [x] 4f. Range scans (`SCAN`), and the B+tree replaces the log behind the REPL
 - [x] **5. Transactions**: `BEGIN`, `COMMIT`, `ROLLBACK`, several writes in a single commit, readers never blocked by the writer
 - [x] **6. Mini-SQL**: `CREATE TABLE`, `INSERT`, `SELECT … WHERE … LIMIT`, `UPDATE`, `DELETE`, range scans on the primary key
-- [ ] **7. TCP server**: multiple concurrent clients
+- [x] **7. TCP server**: multiple concurrent clients, one session and transaction per connection
 
 Then the same path in Rust.
 
@@ -126,11 +129,18 @@ Primary keys are encoded so that byte order matches value order (an `INT` gets i
 
 There is one writer at a time; a second one waits up to 5 seconds, then gets an error. Readers are never blocked by the writer: they read the last committed version, which copy-on-write leaves untouched. A commit only takes an exclusive lock for the in-memory switch to the new version, after its `fsync`s, and that lock waits for readers of the previous version, so a page they read can never be recycled under them.
 
+## Server
+
+`-listen` serves the database over TCP, one goroutine and one session per connection, so each client has its own transaction. A client that disconnects in the middle of a transaction has it rolled back. `Ctrl+C` closes the listener and the open connections, then waits for them to finish.
+
+The protocol is line-based: the client sends one command per line, exactly what it would type in the REPL. The server answers with a header `<n> <state>`, where `state` is `tx` inside a transaction and `idle` otherwise, followed by `n` lines of output. The line count allows multi-line answers without a reserved terminator, and the state lets the client show the right prompt.
+
 ## Layout
 
 ```
 btree/       B+tree nodes, the tree, transactions, and the pager that stores it in a file
 sql/         lexer, parser, planner and executor
-repl/        one command line → one response
-cmd/strata/  the interactive program
+repl/        sessions: one command line → one response
+server/      the TCP server and its client
+cmd/strata/  the program: local REPL, server or client
 ```
