@@ -151,3 +151,32 @@ func leafUpdate(old node, i uint16, key, val []byte) node {
 	appendRange(n, old, i+1, i+1, old.nkeys()-i-1)
 	return n
 }
+
+// leafDelete renvoie une nouvelle feuille : old sans la paire i.
+func leafDelete(old node, i uint16) node {
+	n := make(node, old.nbytes()-pairCost(old.key(i), old.val(i)))
+	n.setHeader(nodeLeaf, old.nkeys()-1)
+	appendRange(n, old, 0, 0, i)
+	appendRange(n, old, i, i+1, old.nkeys()-i-1)
+	return n
+}
+
+// rangeSize est la taille d'un nœud qui contiendrait les paires [from, to) de n.
+func rangeSize(n node, from, to uint16) int {
+	return headerSize + (ptrSize+offsetSize)*int(to-from) + int(n.offset(to)-n.offset(from))
+}
+
+func sliceNode(n node, from, to uint16) node {
+	m := make(node, rangeSize(n, from, to))
+	m.setHeader(n.kind(), to-from)
+	appendRange(m, n, 0, from, to-from)
+	return m
+}
+
+func mergeNodes(left, right node) node {
+	n := make(node, left.nbytes()+right.nbytes()-headerSize)
+	n.setHeader(left.kind(), left.nkeys()+right.nkeys())
+	appendRange(n, left, 0, 0, left.nkeys())
+	appendRange(n, right, left.nkeys(), 0, right.nkeys())
+	return n
+}

@@ -48,6 +48,8 @@ file on disk
 - [x] **3. Compaction**: rewrite the log with the latest value of each key, on demand (`COMPACT`) or automatically
 - [ ] **4. Pager and B-tree**: page-based storage, range queries
   - [x] 4a. Node format: fixed-size pages, offset table for binary search, copy-on-write builders
+  - [x] 4b. Insert and lookup: splits that propagate up, the tree grows from the root
+  - [x] 4c. Delete: merging small nodes, the tree loses a level when the root has one child
 - [ ] **5. Transactions**: `BEGIN`, `COMMIT`, `ROLLBACK`, crash recovery
 - [ ] **6. Mini-SQL**: `CREATE TABLE`, `INSERT`, `SELECT … WHERE`
 - [ ] **7. TCP server**: multiple concurrent clients
