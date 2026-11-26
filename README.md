@@ -28,6 +28,12 @@ strata> SCAN b d
 cerise = 7
 strata> DEL pomme
 1
+strata> BEGIN
+OK
+strata*> SET ananas 0
+OK
+strata*> ROLLBACK
+OK
 ```
 
 `SCAN [start [end]]` lists the keys in `[start, end)` in order. Data survives restarts and crashes. To run the tests: `go test ./...`
@@ -58,7 +64,7 @@ file on disk
   - [x] 4d. Pager on disk: copy-on-write commits, two alternating meta pages, crash recovery
   - [x] 4e. Free list: reuse pages freed by earlier commits
   - [x] 4f. Range scans (`SCAN`), and the B+tree replaces the log behind the REPL
-- [ ] **5. Transactions**: `BEGIN`, `COMMIT`, `ROLLBACK`, several writes in a single commit
+- [x] **5. Transactions**: `BEGIN`, `COMMIT`, `ROLLBACK`, several writes in a single commit, readers never blocked by the writer
 - [ ] **6. Mini-SQL**: `CREATE TABLE`, `INSERT`, `SELECT … WHERE`
 - [ ] **7. TCP server**: multiple concurrent clients
 
@@ -85,6 +91,12 @@ Pages are never modified in place. A write copies the path from the leaf to the 
 The two meta slots alternate (version `v` goes to slot `v % 2`), so a meta write cut short by a crash only damages the slot that was not in use. On open, the valid meta with the highest version wins.
 
 Freed pages are listed in a chain of free list pages that the meta points to. A page freed by commit `N` still belongs to the tree of version `N - 1`, the one a crash would fall back to, so it only becomes reusable from commit `N + 1`.
+
+## Transactions and concurrency
+
+`BEGIN` opens a write transaction: its writes go to new pages kept in memory, and only that session sees them. `COMMIT` writes them all with a single pair of `fsync`s, so a transaction is all or nothing, even across a crash. `ROLLBACK` just drops the pages. Outside `BEGIN`, each write is its own transaction.
+
+There is one writer at a time; a second one waits up to 5 seconds, then gets an error. Readers are never blocked by the writer: they read the last committed version, which copy-on-write leaves untouched. A commit only takes an exclusive lock for the in-memory switch to the new version, after its `fsync`s, and that lock waits for readers of the previous version, so a page they read can never be recycled under them.
 
 ## Layout
 

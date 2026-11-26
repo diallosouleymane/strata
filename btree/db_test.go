@@ -79,10 +79,10 @@ func TestDBCrashBeforeMetaKeepsLastCommit(t *testing.T) {
 	db := openDB(t, path)
 	mustSetDB(t, db, "a", "1")
 
-	if err := db.t.set([]byte("b"), []byte("2")); err != nil {
-		t.Fatal(err)
-	}
-	if err := db.p.writePages(); err != nil {
+	tx, _ := db.Begin()
+	tx.Set([]byte("b"), []byte("2"))
+	tx.buildFreelist()
+	if err := tx.writePages(); err != nil {
 		t.Fatal(err)
 	}
 	db.Close() // la méta n'a jamais été écrite
@@ -225,15 +225,15 @@ func checkNoLeak(t *testing.T, db *DB) {
 	var walk func(id uint64)
 	walk = func(id uint64) {
 		claim(id, "nœud")
-		n := db.p.get(id)
+		n := db.p.readPage(id)
 		if n.kind() == nodeInternal {
 			for i := uint16(0); i < n.nkeys(); i++ {
 				walk(n.ptr(i))
 			}
 		}
 	}
-	if db.t.root != 0 {
-		walk(db.t.root)
+	if root := db.p.committed.root; root != 0 {
+		walk(root)
 	}
 	for _, id := range db.p.reusable {
 		claim(id, "libre")
@@ -241,8 +241,8 @@ func checkNoLeak(t *testing.T, db *DB) {
 	for _, id := range db.p.freelistPages {
 		claim(id, "page de liste libre")
 	}
-	if got := uint64(len(owner)) + metaPages; got != db.p.npages {
-		t.Fatalf("%d pages ont un rôle sur %d : %d pages perdues", got, db.p.npages, db.p.npages-got)
+	if got, all := uint64(len(owner))+metaPages, db.p.committed.npages; got != all {
+		t.Fatalf("%d pages ont un rôle sur %d : %d pages perdues", got, all, all-got)
 	}
 }
 
@@ -312,11 +312,12 @@ func TestFreelistCrashKeepsCommittedTree(t *testing.T) {
 	if len(db.p.reusable) == 0 {
 		t.Fatal("le scénario suppose des pages libres à recycler")
 	}
+	tx, _ := db.Begin()
 	for i := 0; i < 50; i++ {
-		db.t.set([]byte(fmt.Sprintf("k%03d", i)), []byte("jamais validé"))
+		tx.Set([]byte(fmt.Sprintf("k%03d", i)), []byte("jamais validé"))
 	}
-	db.p.buildFreelist()
-	if err := db.p.writePages(); err != nil {
+	tx.buildFreelist()
+	if err := tx.writePages(); err != nil {
 		t.Fatal(err)
 	}
 	db.Close()

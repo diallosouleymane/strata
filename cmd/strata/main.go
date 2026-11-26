@@ -22,13 +22,23 @@ func main() {
 	}
 	defer db.Close()
 
+	session := repl.NewSession(db)
+	defer session.Close()
+
 	in := bufio.NewScanner(os.Stdin)
-	fmt.Print("strata> ")
+	prompt := func() {
+		if session.InTx() {
+			fmt.Print("strata*> ") // l'étoile signale une transaction ouverte, comme dans psql
+		} else {
+			fmt.Print("strata> ")
+		}
+	}
+	prompt()
 	for in.Scan() {
-		if out := repl.Execute(db, in.Text()); out != "" {
+		if out := session.Execute(in.Text()); out != "" {
 			fmt.Println(out)
 		}
-		fmt.Print("strata> ")
+		prompt()
 	}
 	if err := in.Err(); err != nil {
 		log.Printf("lecture de l'entrée : %v", err)

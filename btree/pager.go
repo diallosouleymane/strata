@@ -64,24 +64,18 @@ func decodeMeta(b []byte) (meta, bool) {
 }
 
 // pageError transporte une erreur d'entrée-sortie à travers l'arbre, qui ne renvoie pas d'erreurs ;
-// DB la récupère avec recover et la renvoie comme une erreur normale.
+// DB et Tx la récupèrent avec recover et la renvoient comme une erreur normale.
 type pageError struct{ err error }
 
-// pager implémente pageStore sur un fichier. Les pages allouées restent en mémoire jusqu'au commit :
-// le fichier n'est jamais modifié là où l'arbre déjà validé pourrait le lire.
+// pager détient le fichier et la dernière version validée. Une transaction en cours garde ses
+// modifications de son côté (voir Tx) : ici, rien ne change avant la bascule d'un commit.
 type pager struct {
 	f         *os.File
 	committed meta
-	npages    uint64
-	dirty     map[uint64]node
-
-	// reusable : pages hors de l'arbre validé, utilisables tout de suite.
-	// freed : pages libérées par la transaction en cours ; l'arbre validé les utilise encore.
+	// reusable : les pages hors de l'arbre validé et hors de sa liste libre.
 	// freelistPages : les pages qui stockent la liste libre validée.
-	reusable          []uint64
-	committedReusable []uint64
-	freed             []uint64
-	freelistPages     []uint64
+	reusable      []uint64
+	freelistPages []uint64
 }
 
 func openPager(path string) (*pager, error) {
@@ -89,7 +83,7 @@ func openPager(path string) (*pager, error) {
 	if err != nil {
 		return nil, err
 	}
-	p := &pager{f: f, dirty: map[uint64]node{}}
+	p := &pager{f: f}
 	if err := p.load(path); err != nil {
 		f.Close()
 		return nil, err
@@ -111,7 +105,7 @@ func (p *pager) load(path string) error {
 		if err := syncDir(filepath.Dir(path)); err != nil {
 			return err
 		}
-		p.committed, p.npages = m, m.npages
+		p.committed = m
 		return nil
 	}
 
@@ -132,21 +126,21 @@ func (p *pager) load(path string) error {
 	if int64(best.npages)*PageSize > info.Size() {
 		return fmt.Errorf("btree: la méta annonce %d pages mais le fichier n'en contient que %d", best.npages, info.Size()/PageSize)
 	}
-	p.committed, p.npages = best, best.npages
+	p.committed = best
 
 	ids, pages, err := p.readFreelist(best.freelist)
 	if err != nil {
 		return err
 	}
-	p.reusable, p.committedReusable, p.freelistPages = ids, slices.Clone(ids), pages
+	p.reusable, p.freelistPages = ids, pages
 	return nil
 }
 
-func (p *pager) validPage(id uint64) bool { return id >= metaPages && id < p.npages }
+func (p *pager) validPage(id uint64) bool { return id >= metaPages && id < p.committed.npages }
 
 func (p *pager) readFreelist(head uint64) (ids, pages []uint64, err error) {
 	for id := head; id != 0; {
-		if !p.validPage(id) || uint64(len(pages)) >= p.npages {
+		if !p.validPage(id) || uint64(len(pages)) >= p.committed.npages {
 			return nil, nil, fmt.Errorf("btree: liste libre corrompue à la page %d", id)
 		}
 		b := make([]byte, PageSize)
@@ -170,12 +164,10 @@ func (p *pager) readFreelist(head uint64) (ids, pages []uint64, err error) {
 	return ids, pages, nil
 }
 
-func (p *pager) get(id uint64) node {
-	if n, ok := p.dirty[id]; ok {
-		return n
-	}
+// readPage lit un nœud de la version validée.
+func (p *pager) readPage(id uint64) node {
 	if !p.validPage(id) {
-		panic(pageError{fmt.Errorf("btree: page %d hors du fichier (%d pages)", id, p.npages)})
+		panic(pageError{fmt.Errorf("btree: page %d hors du fichier (%d pages)", id, p.committed.npages)})
 	}
 	n := make(node, PageSize)
 	if _, err := p.f.ReadAt(n, int64(id)*PageSize); err != nil {
@@ -187,103 +179,6 @@ func (p *pager) get(id uint64) node {
 	return n
 }
 
-func (p *pager) alloc(n node) uint64 {
-	if n.nbytes() > PageSize {
-		panic(fmt.Sprintf("btree: nœud de %d octets alloué, plus qu'une page", n.nbytes()))
-	}
-	id := p.takePage()
-	p.dirty[id] = n
-	return id
-}
-
-// takePage réutilise une page libre si possible, sinon agrandit le fichier.
-func (p *pager) takePage() uint64 {
-	if k := len(p.reusable); k > 0 {
-		id := p.reusable[k-1]
-		p.reusable = p.reusable[:k-1]
-		return id
-	}
-	id := p.npages
-	p.npages++
-	return id
-}
-
-func (p *pager) free(id uint64) {
-	if _, ok := p.dirty[id]; ok {
-		// Allouée et libérée dans la même transaction : jamais validée, donc réutilisable tout de suite.
-		delete(p.dirty, id)
-		p.reusable = append(p.reusable, id)
-		return
-	}
-	p.freed = append(p.freed, id)
-}
-
-func (p *pager) hasChanges() bool { return len(p.dirty) > 0 || len(p.freed) > 0 }
-
-// commit rend durable un nouvel arbre. L'ordre des fsync est ce qui garantit la reprise après crash :
-// les nouvelles pages d'abord, la méta ensuite. Dans l'autre ordre, la méta pourrait pointer vers des
-// pages pas encore écrites.
-func (p *pager) commit(root uint64) error {
-	ids, pages := p.buildFreelist()
-	if err := p.writePages(); err != nil {
-		return err
-	}
-	var head uint64
-	if len(pages) > 0 {
-		head = pages[0]
-	}
-	m := meta{version: p.committed.version + 1, root: root, npages: p.npages, freelist: head}
-	if err := p.writeMeta(m); err != nil {
-		return err
-	}
-	p.committed = m
-	p.dirty = map[uint64]node{}
-	p.freed = nil
-	p.reusable, p.committedReusable, p.freelistPages = ids, slices.Clone(ids), pages
-	return nil
-}
-
-// buildFreelist prépare les pages de la prochaine liste libre et les ajoute aux pages à écrire.
-//
-// Les pages libérées par cette transaction (et les anciennes pages de la liste) servent encore à l'arbre
-// validé, sur lequel on retomberait après un crash : on les note, mais on ne les réutilise qu'au commit suivant.
-// Les pages de la nouvelle liste sont prises parmi celles réutilisables tout de suite, sinon le fichier
-// grossirait à chaque commit.
-func (p *pager) buildFreelist() (ids, pages []uint64) {
-	later := append(slices.Clone(p.freed), p.freelistPages...)
-	for len(pages)*freelistPerPage < len(p.reusable)+len(later) {
-		pages = append(pages, p.takePage())
-	}
-	ids = append(slices.Clone(p.reusable), later...)
-
-	for j, id := range pages {
-		chunk := ids[j*freelistPerPage : min((j+1)*freelistPerPage, len(ids))]
-		b := make(node, PageSize)
-		binary.LittleEndian.PutUint16(b, nodeFreelist)
-		binary.LittleEndian.PutUint16(b[2:], uint16(len(chunk)))
-		if j+1 < len(pages) {
-			binary.LittleEndian.PutUint64(b[4:], pages[j+1])
-		}
-		for i, free := range chunk {
-			binary.LittleEndian.PutUint64(b[freelistHeader+8*i:], free)
-		}
-		p.dirty[id] = b
-	}
-	return ids, pages
-}
-
-func (p *pager) writePages() error {
-	buf := make([]byte, PageSize)
-	for id, n := range p.dirty {
-		clear(buf)
-		copy(buf, n)
-		if _, err := p.f.WriteAt(buf, int64(id)*PageSize); err != nil {
-			return err
-		}
-	}
-	return p.f.Sync()
-}
-
 // writeMeta écrit dans l'emplacement qui n'est pas en service : si cette écriture est interrompue,
 // l'autre emplacement contient toujours la version précédente, intacte.
 func (p *pager) writeMeta(m meta) error {
@@ -293,12 +188,12 @@ func (p *pager) writeMeta(m meta) error {
 	return p.f.Sync()
 }
 
-func (p *pager) rollback() {
-	p.dirty = map[uint64]node{}
-	p.freed = nil
-	p.npages = p.committed.npages
-	p.reusable = slices.Clone(p.committedReusable)
-}
+// snapshot est un pageStore en lecture seule sur la version validée.
+type snapshot struct{ p *pager }
+
+func (s snapshot) get(id uint64) node { return s.p.readPage(id) }
+func (s snapshot) alloc(node) uint64  { panic("btree: écriture à travers une lecture seule") }
+func (s snapshot) free(uint64)        { panic("btree: écriture à travers une lecture seule") }
 
 func syncDir(dir string) error {
 	d, err := os.Open(dir)
@@ -308,3 +203,5 @@ func syncDir(dir string) error {
 	defer d.Close()
 	return d.Sync()
 }
+
+func cloneIDs(ids []uint64) []uint64 { return slices.Clone(ids) }
