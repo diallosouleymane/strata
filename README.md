@@ -20,6 +20,8 @@ strata> DEL name
 1
 strata> GET name
 (nil)
+strata> COMPACT
+OK
 ```
 
 Les données survivent au redémarrage. Pour lancer les tests : `go test ./...`
@@ -43,7 +45,7 @@ fichier sur disque
 
 - [x] **1. KV en mémoire** : `SET`, `GET`, `DEL` et le REPL
 - [x] **2. Journal en ajout seul** : format binaire avec CRC32, `fsync`, relecture à l'ouverture, troncature d'une fin abîmée par un crash
-- [ ] **3. Compaction** : réécrire le journal avec la dernière valeur de chaque clé
+- [x] **3. Compaction** : réécrire le journal avec la dernière valeur de chaque clé, à la demande (`COMPACT`) ou automatiquement
 - [ ] **4. Pager et B-tree** : stockage par pages, requêtes par plage
 - [ ] **5. Transactions** : `BEGIN`, `COMMIT`, `ROLLBACK`, reprise après crash
 - [ ] **6. Mini-SQL** : `CREATE TABLE`, `INSERT`, `SELECT … WHERE`
@@ -60,6 +62,10 @@ Chaque opération est ajoutée à la fin du fichier (entiers en little-endian) :
 ```
 
 `op` vaut 1 pour `SET` et 2 pour `DEL`. Le CRC32 couvre tout ce qui le suit. Au démarrage, le journal est rejoué dans l'ordre ; un enregistrement incomplet ou dont le CRC est faux marque la fin du journal valide, et le fichier est coupé à cet endroit.
+
+## Compaction
+
+Le journal garde toutes les versions d'une clé. La compaction écrit un journal neuf (`<fichier>.compact`) avec un seul `SET` par clé vivante, le synchronise, puis le renomme par-dessus l'ancien. `rename` étant atomique, un crash laisse soit l'ancien journal, soit le nouveau, jamais un mélange. Elle se déclenche toute seule dès 1000 enregistrements quand plus de la moitié sont périmés.
 
 ## Organisation
 

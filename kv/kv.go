@@ -6,18 +6,29 @@ import (
 	"os"
 )
 
+// En dessous de ce nombre d'enregistrements, compacter coûte plus que relire le journal.
+const defaultCompactAfter = 1000
+
 type Store struct {
 	data map[string]string
 	f    *os.File
+	path string
+
+	records      int // enregistrements présents dans le journal, périmés compris
+	compactAfter int
 }
 
 // Open ouvre (ou crée) le journal et reconstruit l'état en le rejouant.
 func Open(path string) (*Store, error) {
+	// Reste d'une compaction interrompue par un crash : le journal principal fait foi.
+	if err := os.Remove(compactPath(path)); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return nil, err
+	}
 	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE|os.O_APPEND, 0o644)
 	if err != nil {
 		return nil, err
 	}
-	s := &Store{data: make(map[string]string), f: f}
+	s := &Store{data: make(map[string]string), f: f, path: path, compactAfter: defaultCompactAfter}
 	if err := s.replay(); err != nil {
 		f.Close()
 		return nil, err
@@ -46,6 +57,7 @@ func (s *Store) replay() error {
 			return err
 		}
 		s.apply(rec)
+		s.records++
 		offset += n
 	}
 }
@@ -69,6 +81,12 @@ func (s *Store) write(rec record) error {
 		return err
 	}
 	s.apply(rec)
+	s.records++
+
+	if s.records >= s.compactAfter && s.records > 2*len(s.data) {
+		// L'écriture est déjà durable : un échec ici laisse l'ancien journal intact, on réessaiera plus tard.
+		_ = s.Compact()
+	}
 	return nil
 }
 

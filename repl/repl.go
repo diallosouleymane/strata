@@ -14,6 +14,7 @@ import (
 //	SET <clé> <valeur>  -> "OK"
 //	GET <clé>           -> la valeur, ou "(nil)"
 //	DEL <clé>           -> "1" si supprimée, "0" sinon
+//	COMPACT             -> "OK" (réécrit le journal sans les entrées périmées)
 func Execute(s *kv.Store, line string) string {
 	args := strings.Fields(line)
 	if len(args) == 0 {
@@ -52,6 +53,15 @@ func Execute(s *kv.Store, line string) string {
 			return "1"
 		}
 		return "0"
+
+	case "COMPACT":
+		if len(args) != 1 {
+			return wrongArgs(cmd)
+		}
+		if err := s.Compact(); err != nil {
+			return "ERR " + err.Error()
+		}
+		return "OK"
 	}
 
 	return fmt.Sprintf("ERR unknown command '%s'", cmd)

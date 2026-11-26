@@ -1,6 +1,8 @@
 package kv
 
 import (
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -163,5 +165,88 @@ func appendBytes(t *testing.T, path string, b []byte) {
 	defer f.Close()
 	if _, err := f.Write(b); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func fileSize(t *testing.T, path string) int64 {
+	t.Helper()
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return info.Size()
+}
+
+func TestCompactKeepsLatestState(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "db.log")
+	s := openAt(t, path)
+	mustSet(t, s, "a", "1")
+	mustSet(t, s, "a", "2")
+	mustSet(t, s, "b", "x")
+	s.Delete("b")
+	mustSet(t, s, "c", "3")
+	before := fileSize(t, path)
+
+	if err := s.Compact(); err != nil {
+		t.Fatalf("Compact : %v", err)
+	}
+	if after := fileSize(t, path); after >= before {
+		t.Fatalf("taille après compaction = %d ; attendu < %d", after, before)
+	}
+	// Le store doit continuer à écrire dans le nouveau journal.
+	mustSet(t, s, "d", "4")
+	s.Close()
+
+	s = openAt(t, path)
+	defer s.Close()
+	want := map[string]string{"a": "2", "c": "3", "d": "4"}
+	for k, v := range want {
+		if got, _ := s.Get(k); got != v {
+			t.Errorf("Get(%s) = %q ; attendu %q", k, got, v)
+		}
+	}
+	if _, ok := s.Get("b"); ok {
+		t.Error("b supprimée ne doit pas revenir après compaction")
+	}
+	if s.Len() != len(want) {
+		t.Errorf("Len() = %d ; attendu %d", s.Len(), len(want))
+	}
+}
+
+func TestAutoCompact(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "db.log")
+	s := openAt(t, path)
+	s.compactAfter = 10
+	for i := 0; i < 100; i++ {
+		mustSet(t, s, "compteur", fmt.Sprint(i))
+	}
+	s.Close()
+
+	s = openAt(t, path)
+	defer s.Close()
+	if s.records >= 10 {
+		t.Fatalf("journal de %d enregistrements ; la compaction automatique aurait dû le réduire", s.records)
+	}
+	if v, _ := s.Get("compteur"); v != "99" {
+		t.Fatalf("Get(compteur) = %q ; attendu \"99\"", v)
+	}
+}
+
+func TestLeftoverCompactFileIsRemoved(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "db.log")
+	s := openAt(t, path)
+	mustSet(t, s, "a", "1")
+	s.Close()
+	if err := os.WriteFile(compactPath(path), []byte("compaction interrompue"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	s = openAt(t, path)
+	defer s.Close()
+	if _, err := os.Stat(compactPath(path)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("le fichier de compaction abandonné doit être supprimé à l'ouverture")
+	}
+	if v, _ := s.Get("a"); v != "1" {
+		t.Fatalf("Get(a) = %q ; attendu \"1\"", v)
 	}
 }

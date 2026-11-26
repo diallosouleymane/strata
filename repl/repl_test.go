@@ -28,6 +28,10 @@ func TestExecute(t *testing.T) {
 		{"SET a", "ERR wrong number of arguments for 'SET'"},
 		{"GET", "ERR wrong number of arguments for 'GET'"},
 		{"DEL a b", "ERR wrong number of arguments for 'DEL'"},
+		{"SET x 1", "OK"},
+		{"compact", "OK"},
+		{"GET x", "1"},
+		{"COMPACT now", "ERR wrong number of arguments for 'COMPACT'"},
 	}
 	for _, c := range cases {
 		if got := Execute(s, c.in); got != c.want {
