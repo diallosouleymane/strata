@@ -47,6 +47,7 @@ file on disk
 - [x] **2. Append-only log**: binary format with CRC32, `fsync`, replay on open, truncation of a tail damaged by a crash
 - [x] **3. Compaction**: rewrite the log with the latest value of each key, on demand (`COMPACT`) or automatically
 - [ ] **4. Pager and B-tree**: page-based storage, range queries
+  - [x] 4a. Node format: fixed-size pages, offset table for binary search, copy-on-write builders
 - [ ] **5. Transactions**: `BEGIN`, `COMMIT`, `ROLLBACK`, crash recovery
 - [ ] **6. Mini-SQL**: `CREATE TABLE`, `INSERT`, `SELECT … WHERE`
 - [ ] **7. TCP server**: multiple concurrent clients
@@ -71,6 +72,7 @@ The log keeps every version of a key. Compaction writes a fresh log (`<file>.com
 
 ```
 kv/          the storage engine (Store, record format)
+btree/       B+tree nodes and, soon, the tree itself
 repl/        one command line → one response
 cmd/strata/  the interactive program
 ```
