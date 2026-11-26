@@ -210,3 +210,144 @@ func TestDBRandomOpsWithReopen(t *testing.T) {
 		}
 	}
 }
+
+// checkNoLeak vérifie que chaque page du fichier a exactement un rôle : méta, nœud de l'arbre,
+// page libre ou page de la liste libre.
+func checkNoLeak(t *testing.T, db *DB) {
+	t.Helper()
+	owner := map[uint64]string{}
+	claim := func(id uint64, role string) {
+		if prev, ok := owner[id]; ok {
+			t.Fatalf("page %d est à la fois %s et %s", id, prev, role)
+		}
+		owner[id] = role
+	}
+	var walk func(id uint64)
+	walk = func(id uint64) {
+		claim(id, "nœud")
+		n := db.p.get(id)
+		if n.kind() == nodeInternal {
+			for i := uint16(0); i < n.nkeys(); i++ {
+				walk(n.ptr(i))
+			}
+		}
+	}
+	if db.t.root != 0 {
+		walk(db.t.root)
+	}
+	for _, id := range db.p.reusable {
+		claim(id, "libre")
+	}
+	for _, id := range db.p.freelistPages {
+		claim(id, "page de liste libre")
+	}
+	if got := uint64(len(owner)) + metaPages; got != db.p.npages {
+		t.Fatalf("%d pages ont un rôle sur %d : %d pages perdues", got, db.p.npages, db.p.npages-got)
+	}
+}
+
+func fileSize(t *testing.T, path string) int64 {
+	t.Helper()
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return info.Size()
+}
+
+// Sans liste libre, 1000 SET sur la même clé faisaient un fichier de 1002 pages.
+func TestFreelistStopsGrowth(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "strata.db")
+	db := openDB(t, path)
+	defer db.Close()
+	for i := 0; i < 1000; i++ {
+		mustSetDB(t, db, "compteur", fmt.Sprint(i))
+	}
+	if pages := fileSize(t, path) / PageSize; pages > 10 {
+		t.Fatalf("1000 SET sur la même clé : %d pages ; la liste libre devrait les recycler", pages)
+	}
+	checkNoLeak(t, db)
+}
+
+func TestFreelistSurvivesReopen(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "strata.db")
+	db := openDB(t, path)
+	for i := 0; i < 3000; i++ {
+		mustSetDB(t, db, fmt.Sprintf("k%04d", i), strings.Repeat("v", 100))
+	}
+	for i := 0; i < 3000; i++ {
+		db.Delete([]byte(fmt.Sprintf("k%04d", i)))
+	}
+	free := len(db.p.reusable)
+	size := fileSize(t, path)
+	db.Close()
+
+	db = openDB(t, path)
+	defer db.Close()
+	if len(db.p.reusable) != free {
+		t.Fatalf("%d pages libres après réouverture ; attendu %d", len(db.p.reusable), free)
+	}
+	checkNoLeak(t, db)
+	// Remplir à nouveau doit réutiliser l'espace libéré au lieu d'agrandir le fichier.
+	for i := 0; i < 3000; i++ {
+		mustSetDB(t, db, fmt.Sprintf("k%04d", i), strings.Repeat("v", 100))
+	}
+	if after := fileSize(t, path); after > size {
+		t.Fatalf("le fichier est passé de %d à %d octets malgré %d pages libres", size, after, free)
+	}
+	checkNoLeak(t, db)
+}
+
+// Reprend le crash entre les deux fsync, mais avec des pages recyclées : la transaction interrompue
+// a écrit dans des pages libres, jamais dans celles de l'arbre validé.
+func TestFreelistCrashKeepsCommittedTree(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "strata.db")
+	db := openDB(t, path)
+	want := map[string]string{}
+	for i := 0; i < 500; i++ {
+		k := fmt.Sprintf("k%03d", i%50)
+		mustSetDB(t, db, k, fmt.Sprint(i))
+		want[k] = fmt.Sprint(i)
+	}
+	if len(db.p.reusable) == 0 {
+		t.Fatal("le scénario suppose des pages libres à recycler")
+	}
+	for i := 0; i < 50; i++ {
+		db.t.set([]byte(fmt.Sprintf("k%03d", i)), []byte("jamais validé"))
+	}
+	db.p.buildFreelist()
+	if err := db.p.writePages(); err != nil {
+		t.Fatal(err)
+	}
+	db.Close()
+
+	db = openDB(t, path)
+	defer db.Close()
+	for k, v := range want {
+		if got, _ := mustGet(t, db, k); got != v {
+			t.Fatalf("Get(%q) = %q ; attendu %q", k, got, v)
+		}
+	}
+	checkNoLeak(t, db)
+}
+
+func TestFreelistRandomOpsNoLeak(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "strata.db")
+	db := openDB(t, path)
+	r := rand.New(rand.NewPCG(9, 10))
+	for op := 0; op < 4000; op++ {
+		k := fmt.Sprintf("k%03d", r.IntN(400))
+		if r.IntN(3) == 0 {
+			db.Delete([]byte(k))
+		} else {
+			mustSetDB(t, db, k, strings.Repeat("v", r.IntN(MaxValSize)))
+		}
+		if op%1000 == 999 {
+			checkNoLeak(t, db)
+			db.Close()
+			db = openDB(t, path)
+			checkNoLeak(t, db)
+		}
+	}
+	db.Close()
+}

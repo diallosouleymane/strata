@@ -7,23 +7,34 @@ import (
 	"hash/crc32"
 	"os"
 	"path/filepath"
+	"slices"
 )
 
-// Les pages 0 et 1 sont deux pages méta qui alternent ; les nœuds commencent à la page 2.
+// Les pages 0 et 1 sont deux pages méta qui alternent ; les autres pages sont des nœuds
+// ou des pages de la liste libre.
 //
 // Format d'une page méta (little-endian) :
 //
-//	| magic "STRATA01" (8) | version (8) | racine (8) | nombre de pages (8) | crc32 des 32 premiers octets (4) |
+//	| magic "STRATA02" (8) | version (8) | racine (8) | nombre de pages (8) | liste libre (8) | crc32 des 40 premiers octets (4) |
+//
+// Format d'une page de la liste libre :
+//
+//	| type = 3 (2) | nombre d'ids (2) | page suivante (8) | ids (nombre × 8) |
 const (
-	metaMagic = "STRATA01"
+	metaMagic = "STRATA02"
 	metaPages = 2
-	metaSize  = 36
+	metaSize  = 44
+
+	nodeFreelist    uint16 = 3
+	freelistHeader         = 12
+	freelistPerPage        = (PageSize - freelistHeader) / 8
 )
 
 type meta struct {
-	version uint64
-	root    uint64
-	npages  uint64
+	version  uint64
+	root     uint64
+	npages   uint64
+	freelist uint64
 }
 
 func encodeMeta(m meta) []byte {
@@ -32,7 +43,8 @@ func encodeMeta(m meta) []byte {
 	binary.LittleEndian.PutUint64(b[8:], m.version)
 	binary.LittleEndian.PutUint64(b[16:], m.root)
 	binary.LittleEndian.PutUint64(b[24:], m.npages)
-	binary.LittleEndian.PutUint32(b[32:], crc32.ChecksumIEEE(b[:32]))
+	binary.LittleEndian.PutUint64(b[32:], m.freelist)
+	binary.LittleEndian.PutUint32(b[40:], crc32.ChecksumIEEE(b[:40]))
 	return b
 }
 
@@ -40,13 +52,14 @@ func decodeMeta(b []byte) (meta, bool) {
 	if len(b) < metaSize || string(b[:8]) != metaMagic {
 		return meta{}, false
 	}
-	if crc32.ChecksumIEEE(b[:32]) != binary.LittleEndian.Uint32(b[32:]) {
+	if crc32.ChecksumIEEE(b[:40]) != binary.LittleEndian.Uint32(b[40:]) {
 		return meta{}, false
 	}
 	return meta{
-		version: binary.LittleEndian.Uint64(b[8:]),
-		root:    binary.LittleEndian.Uint64(b[16:]),
-		npages:  binary.LittleEndian.Uint64(b[24:]),
+		version:  binary.LittleEndian.Uint64(b[8:]),
+		root:     binary.LittleEndian.Uint64(b[16:]),
+		npages:   binary.LittleEndian.Uint64(b[24:]),
+		freelist: binary.LittleEndian.Uint64(b[32:]),
 	}, true
 }
 
@@ -61,7 +74,14 @@ type pager struct {
 	committed meta
 	npages    uint64
 	dirty     map[uint64]node
-	freed     []uint64
+
+	// reusable : pages hors de l'arbre validé, utilisables tout de suite.
+	// freed : pages libérées par la transaction en cours ; l'arbre validé les utilise encore.
+	// freelistPages : les pages qui stockent la liste libre validée.
+	reusable          []uint64
+	committedReusable []uint64
+	freed             []uint64
+	freelistPages     []uint64
 }
 
 func openPager(path string) (*pager, error) {
@@ -113,14 +133,48 @@ func (p *pager) load(path string) error {
 		return fmt.Errorf("btree: la méta annonce %d pages mais le fichier n'en contient que %d", best.npages, info.Size()/PageSize)
 	}
 	p.committed, p.npages = best, best.npages
+
+	ids, pages, err := p.readFreelist(best.freelist)
+	if err != nil {
+		return err
+	}
+	p.reusable, p.committedReusable, p.freelistPages = ids, slices.Clone(ids), pages
 	return nil
+}
+
+func (p *pager) validPage(id uint64) bool { return id >= metaPages && id < p.npages }
+
+func (p *pager) readFreelist(head uint64) (ids, pages []uint64, err error) {
+	for id := head; id != 0; {
+		if !p.validPage(id) || uint64(len(pages)) >= p.npages {
+			return nil, nil, fmt.Errorf("btree: liste libre corrompue à la page %d", id)
+		}
+		b := make([]byte, PageSize)
+		if _, err := p.f.ReadAt(b, int64(id)*PageSize); err != nil {
+			return nil, nil, fmt.Errorf("btree: lecture de la liste libre, page %d : %w", id, err)
+		}
+		count := int(binary.LittleEndian.Uint16(b[2:]))
+		if binary.LittleEndian.Uint16(b) != nodeFreelist || count > freelistPerPage {
+			return nil, nil, fmt.Errorf("btree: page %d : ce n'est pas une page de liste libre", id)
+		}
+		for i := 0; i < count; i++ {
+			free := binary.LittleEndian.Uint64(b[freelistHeader+8*i:])
+			if !p.validPage(free) {
+				return nil, nil, fmt.Errorf("btree: la liste libre cite la page %d, hors du fichier", free)
+			}
+			ids = append(ids, free)
+		}
+		pages = append(pages, id)
+		id = binary.LittleEndian.Uint64(b[4:])
+	}
+	return ids, pages, nil
 }
 
 func (p *pager) get(id uint64) node {
 	if n, ok := p.dirty[id]; ok {
 		return n
 	}
-	if id < metaPages || id >= p.npages {
+	if !p.validPage(id) {
 		panic(pageError{fmt.Errorf("btree: page %d hors du fichier (%d pages)", id, p.npages)})
 	}
 	n := make(node, PageSize)
@@ -133,20 +187,32 @@ func (p *pager) get(id uint64) node {
 	return n
 }
 
-// alloc ajoute toujours la page en fin de fichier : réutiliser les pages libérées viendra avec la liste libre.
 func (p *pager) alloc(n node) uint64 {
 	if n.nbytes() > PageSize {
 		panic(fmt.Sprintf("btree: nœud de %d octets alloué, plus qu'une page", n.nbytes()))
 	}
+	id := p.takePage()
+	p.dirty[id] = n
+	return id
+}
+
+// takePage réutilise une page libre si possible, sinon agrandit le fichier.
+func (p *pager) takePage() uint64 {
+	if k := len(p.reusable); k > 0 {
+		id := p.reusable[k-1]
+		p.reusable = p.reusable[:k-1]
+		return id
+	}
 	id := p.npages
 	p.npages++
-	p.dirty[id] = n
 	return id
 }
 
 func (p *pager) free(id uint64) {
 	if _, ok := p.dirty[id]; ok {
-		delete(p.dirty, id) // jamais écrite, rien à libérer sur disque
+		// Allouée et libérée dans la même transaction : jamais validée, donc réutilisable tout de suite.
+		delete(p.dirty, id)
+		p.reusable = append(p.reusable, id)
 		return
 	}
 	p.freed = append(p.freed, id)
@@ -158,24 +224,59 @@ func (p *pager) hasChanges() bool { return len(p.dirty) > 0 || len(p.freed) > 0 
 // les nouvelles pages d'abord, la méta ensuite. Dans l'autre ordre, la méta pourrait pointer vers des
 // pages pas encore écrites.
 func (p *pager) commit(root uint64) error {
+	ids, pages := p.buildFreelist()
 	if err := p.writePages(); err != nil {
 		return err
 	}
-	m := meta{version: p.committed.version + 1, root: root, npages: p.npages}
+	var head uint64
+	if len(pages) > 0 {
+		head = pages[0]
+	}
+	m := meta{version: p.committed.version + 1, root: root, npages: p.npages, freelist: head}
 	if err := p.writeMeta(m); err != nil {
 		return err
 	}
 	p.committed = m
 	p.dirty = map[uint64]node{}
 	p.freed = nil
+	p.reusable, p.committedReusable, p.freelistPages = ids, slices.Clone(ids), pages
 	return nil
+}
+
+// buildFreelist prépare les pages de la prochaine liste libre et les ajoute aux pages à écrire.
+//
+// Les pages libérées par cette transaction (et les anciennes pages de la liste) servent encore à l'arbre
+// validé, sur lequel on retomberait après un crash : on les note, mais on ne les réutilise qu'au commit suivant.
+// Les pages de la nouvelle liste sont prises parmi celles réutilisables tout de suite, sinon le fichier
+// grossirait à chaque commit.
+func (p *pager) buildFreelist() (ids, pages []uint64) {
+	later := append(slices.Clone(p.freed), p.freelistPages...)
+	for len(pages)*freelistPerPage < len(p.reusable)+len(later) {
+		pages = append(pages, p.takePage())
+	}
+	ids = append(slices.Clone(p.reusable), later...)
+
+	for j, id := range pages {
+		chunk := ids[j*freelistPerPage : min((j+1)*freelistPerPage, len(ids))]
+		b := make(node, PageSize)
+		binary.LittleEndian.PutUint16(b, nodeFreelist)
+		binary.LittleEndian.PutUint16(b[2:], uint16(len(chunk)))
+		if j+1 < len(pages) {
+			binary.LittleEndian.PutUint64(b[4:], pages[j+1])
+		}
+		for i, free := range chunk {
+			binary.LittleEndian.PutUint64(b[freelistHeader+8*i:], free)
+		}
+		p.dirty[id] = b
+	}
+	return ids, pages
 }
 
 func (p *pager) writePages() error {
 	buf := make([]byte, PageSize)
 	for id, n := range p.dirty {
 		clear(buf)
-		copy(buf, n[:n.nbytes()])
+		copy(buf, n)
 		if _, err := p.f.WriteAt(buf, int64(id)*PageSize); err != nil {
 			return err
 		}
@@ -196,6 +297,7 @@ func (p *pager) rollback() {
 	p.dirty = map[uint64]node{}
 	p.freed = nil
 	p.npages = p.committed.npages
+	p.reusable = slices.Clone(p.committedReusable)
 }
 
 func syncDir(dir string) error {

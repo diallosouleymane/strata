@@ -51,7 +51,7 @@ file on disk
   - [x] 4b. Insert and lookup: splits that propagate up, the tree grows from the root
   - [x] 4c. Delete: merging small nodes, the tree loses a level when the root has one child
   - [x] 4d. Pager on disk: copy-on-write commits, two alternating meta pages, crash recovery
-  - [ ] 4e. Free list: reuse pages freed by earlier commits
+  - [x] 4e. Free list: reuse pages freed by earlier commits
   - [ ] 4f. Range scans, and the B+tree replaces the log behind the REPL
 - [ ] **5. Transactions**: `BEGIN`, `COMMIT`, `ROLLBACK`, crash recovery
 - [ ] **6. Mini-SQL**: `CREATE TABLE`, `INSERT`, `SELECT … WHERE`
@@ -78,11 +78,14 @@ The log keeps every version of a key. Compaction writes a fresh log (`<file>.com
 The file is an array of 4 KB pages; page `n` starts at byte `n × 4096`. Pages 0 and 1 are meta pages, every other page holds one tree node.
 
 ```
-meta page: | magic "STRATA01" (8) | version (8) | root page (8) | page count (8) | crc32 (4) |
-node page: | type (2) | nkeys (2) | child pointers (nkeys × 8) | offsets (nkeys × 2) | key/value pairs |
+meta page:     | magic "STRATA02" (8) | version (8) | root page (8) | page count (8) | free list head (8) | crc32 (4) |
+node page:     | type (2) | nkeys (2) | child pointers (nkeys × 8) | offsets (nkeys × 2) | key/value pairs |
+free list page: | type 3 (2) | count (2) | next page (8) | free page ids (count × 8) |
 ```
 
 Pages are never modified in place. A write copies the path from the leaf to the root into new pages, `fsync`s them, then writes a new meta page pointing to the new root and `fsync`s again. The two meta slots alternate (version `v` goes to slot `v % 2`), so a meta write cut short by a crash only damages the slot that was not in use. On open, the valid meta with the highest version wins.
+
+Freed pages are listed in a chain of free list pages that the meta points to. A page freed by commit `N` still belongs to the tree of version `N - 1`, the one a crash would fall back to, so it only becomes reusable from commit `N + 1`.
 
 ## Layout
 
